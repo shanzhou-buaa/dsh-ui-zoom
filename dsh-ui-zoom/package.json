@@ -1,0 +1,46 @@
+{
+  "name": "@local/dsh-ui-zoom",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Interface zoom (50%–400%) for the DeepSeek Harness Web UI, with keyboard shortcuts, Ctrl+wheel and web-menu scaling",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "zoom",
+    "accessibility",
+    "ui"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

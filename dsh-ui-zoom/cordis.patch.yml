@@ -1,0 +1,8 @@
+# Bundle patch for the interface-zoom plugin: inserts its Host row into the profile.
+# `zoom` is the profile-level default (50..400). The per-browser choice is stored
+# in the page's localStorage and overrides this default.
+- insert:
+    - id: ui-zoom
+      name: '@local/dsh-ui-zoom'
+      config:
+        zoom: 100

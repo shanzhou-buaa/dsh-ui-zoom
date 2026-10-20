@@ -1,0 +1,21 @@
+# WorkBuddy project data (local only)
+.workbuddy-ai/
+
+# Dependencies
+node_modules/
+
+# Local development artifacts
+_verify/
+_ref/
+_test/
+.extract/
+asar_files.txt
+package.json.bak-*
+*.tgz
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
