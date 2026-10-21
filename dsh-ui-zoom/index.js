@@ -45,7 +45,7 @@ export function apply(ctx, config) {
       kind: 'script',
       placement: 'body',
       text: `(() => {
-  if (!document.body) return
+  if (!document.head) return
   var percent = ${JSON.stringify(zoom)}
   try {
     var stored = window.localStorage.getItem('dsh-ui-zoom')
@@ -55,10 +55,10 @@ export function apply(ctx, config) {
     }
   } catch (error) {}
   if (percent === ${ZOOM_DEFAULT}) return
-  var host = document.getElementById('root') || document.body
-  if (!host) return
-  document.body.style.removeProperty('zoom')
-  host.style.zoom = String(percent / 100)
+  var style = document.createElement('style')
+  style.setAttribute('data-dsh-ui-zoom-boot', '')
+  style.textContent = '#root{zoom:' + (percent / 100) + '}'
+  document.head.appendChild(style)
   document.documentElement.dataset.dshUiZoom = String(percent)
 })()`,
     });

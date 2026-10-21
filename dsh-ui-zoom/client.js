@@ -2,10 +2,10 @@
  * Browser half of the interface-zoom bundle.
  *
  * Adds an "界面缩放 / Interface zoom" row to Settings → General, right after the
- * font-size row, and applies the chosen percentage to the whole document with
- * the CSS `zoom` property on <body>. Chromium resolves the initial containing
- * block against that zoom, so 100%-height layouts and fixed overlays keep
- * filling the window while every control, panel and dialog scales together.
+ * font-size row, and applies the chosen percentage to the application root
+ * (`#root`) with the CSS `zoom` property. Menus and dialogs are portaled to
+ * `<body>`, outside that root, so `installOverlayZoom` scales web menus
+ * separately and re-anchors them; dialogs intentionally stay at 100%.
  *
  * The choice is a per-browser display preference: it is stored in
  * localStorage, so it survives restarts and is not shared between browsers
@@ -78,6 +78,7 @@ window.__ModuleLoader__.load({
 .dshz-reset{padding:0 4px;border:0;background:0 0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;cursor:pointer}
 .dshz-reset:hover{color:var(--dsw-alias-label-primary)}
 .dshz-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:40;display:flex;flex-direction:column;gap:2px;min-width:136px;max-height:288px;overflow:auto;padding:4px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-panel)}
+.dshz-menu-up{top:auto;bottom:calc(100% + 6px)}
 .dshz-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:6px 10px;border:0;border-radius:var(--dsw-radius-xs);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;text-align:left;cursor:pointer}
 .dshz-option:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshz-option[aria-selected="true"]{color:var(--dsw-alias-state-business-primary);font-weight:500}
@@ -130,7 +131,10 @@ window.__ModuleLoader__.load({
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY);
         if (raw === null || raw === '') return undefined;
-        return normalizeZoom(raw);
+        const numeric = Number(raw);
+        // A corrupted value must not override the boot/profile default.
+        if (!Number.isFinite(numeric)) return undefined;
+        return normalizeZoom(numeric);
       } catch {
         return undefined;
       }
@@ -161,8 +165,11 @@ window.__ModuleLoader__.load({
      */
     function applyDocumentZoom(percent) {
       if (typeof document === 'undefined') return;
-      const host = document.getElementById('root') ?? document.body;
+      const host = document.getElementById('root');
+      // The boot stylesheet already targets #root and survives until the app
+      // mounts; removing it before the host exists would drop the first paint.
       if (host === null) return;
+      document.querySelector?.('style[data-dsh-ui-zoom-boot]')?.remove();
       // Clear a legacy body zoom left by an earlier build or boot script.
       document.body?.style.removeProperty('zoom');
       if (percent === DEFAULT_ZOOM) {
@@ -330,15 +337,27 @@ window.__ModuleLoader__.load({
      */
     function installOverlayZoom(ctx, zoom) {
       if (typeof MutationObserver === 'undefined' || typeof requestAnimationFrame === 'undefined') return;
-      const applied = new WeakMap();
-      const panels = new Set();
-      let anchor = null;
+      const records = new Map();
+      let pointer = null;
+      let trigger = null;
+
+      const triggerOf = (target) => (target instanceof Element
+        ? target.closest('button,[role="button"],[role="menuitem"],[aria-haspopup="true"]') ?? target
+        : null);
 
       const onPointerDown = (event) => {
+        trigger = triggerOf(event.target);
+        pointer = { x: event.clientX, y: event.clientY, at: Date.now() };
+      };
+
+      // Hover submenus open without a pointerdown on the item; remember the
+      // hovered item so the child panel is anchored to it.
+      const onPointerOver = (event) => {
         const target = event.target;
-        anchor = target instanceof Element
-          ? target.closest('button,[role="button"],[role="menuitem"],[aria-haspopup="true"]') ?? target
-          : null;
+        if (!(target instanceof Element)) return;
+        if (target.closest('[role="menuitem"],[aria-haspopup="true"]') === null) return;
+        trigger = triggerOf(target);
+        pointer = { x: event.clientX, y: event.clientY, at: Date.now() };
       };
 
       /** A body-level menu/listbox that the app positions with inline top/left. */
@@ -350,81 +369,196 @@ window.__ModuleLoader__.load({
         return node;
       };
 
-      const correct = (panel) => {
-        const z = zoom.getSnapshot() / 100;
-        const previous = applied.get(panel);
-        if (z === 1 && previous === undefined) return;
-        const trigger = anchor instanceof Element && anchor.isConnected ? anchor : document.activeElement;
-        if (!(trigger instanceof Element)) return;
-        const box = trigger.getBoundingClientRect();
+      /**
+       * Resolve the visual top/left for one panel at zoom `z`.
+       *
+       * Anchored panels follow their trigger (top/bottom/left/right, start/end).
+       * Pointer-positioned panels (context menus) keep the app's pointer
+       * coordinates. Panels without a usable trigger are clamped in place.
+       */
+      const place = (panel, record, z) => {
         const width = panel.offsetWidth;
         const height = panel.offsetHeight;
-        if (width === 0 || height === 0) return;
-        const top = Number.parseFloat(panel.style.top);
-        const left = Number.parseFloat(panel.style.left);
-        if (!Number.isFinite(top) || !Number.isFinite(left)) return;
-        if (previous !== undefined
-          && Math.abs(previous.top - top) < 0.5
-          && Math.abs(previous.left - left) < 0.5
-          && previous.zoom === z) return;
-
-        const side = top < box.top ? 'top' : 'bottom';
-        const align = Math.abs(left - box.left) < Math.abs(left + width - box.right) ? 'start' : 'end';
-        const gap = 4 * z;
-        let visualLeft = align === 'end' ? box.right - width * z : box.left;
-        let visualTop = side === 'top' ? box.top - gap - height * z : box.bottom + gap;
+        if (width === 0 || height === 0) return null;
         const margin = 12 * z;
-        visualLeft = Math.min(Math.max(visualLeft, margin), window.innerWidth - width * z - margin);
-        visualTop = Math.min(Math.max(visualTop, margin), window.innerHeight - height * z - margin);
-
-        if (z === 1) panel.style.removeProperty('zoom');
-        else panel.style.zoom = String(z);
-        panel.style.left = `${visualLeft / z}px`;
-        panel.style.top = `${visualTop / z}px`;
-        applied.set(panel, { top: visualTop / z, left: visualLeft / z, zoom: z });
+        const maxLeft = window.innerWidth - width * z - margin;
+        const maxTop = window.innerHeight - height * z - margin;
+        const clampX = (value) => Math.min(Math.max(value, margin), Math.max(margin, maxLeft));
+        const clampY = (value) => Math.min(Math.max(value, margin), Math.max(margin, maxTop));
+        const origin = record.origin;
+        const originPointer = record.pointer;
+        if (originPointer !== null
+          && Math.abs(origin.top - originPointer.y) <= 16
+          && Math.abs(origin.left - originPointer.x) <= 16) {
+          return { left: clampX(origin.left), top: clampY(origin.top) };
+        }
+        const anchor = record.anchor instanceof Element && record.anchor.isConnected ? record.anchor : null;
+        if (anchor === null) return { left: clampX(origin.left), top: clampY(origin.top) };
+        const box = anchor.getBoundingClientRect();
+        const gap = 4 * z;
+        const withinY = origin.top >= box.top - 2 && origin.top <= box.bottom + 2;
+        const side = withinY && origin.left >= box.right - 2
+          ? 'right'
+          : origin.left + width <= box.left + 2
+            ? 'left'
+            : origin.top < box.top
+              ? 'top'
+              : 'bottom';
+        let left;
+        let top;
+        if (side === 'right' || side === 'left') {
+          const alignEnd = Math.abs(origin.top - box.top) >= Math.abs(origin.top + height - box.bottom);
+          left = side === 'right' ? box.right + gap : box.left - gap - width * z;
+          top = alignEnd ? box.bottom - height * z : box.top;
+        } else {
+          const alignEnd = Math.abs(origin.left - box.left) >= Math.abs(origin.left + width - box.right);
+          left = alignEnd ? box.right - width * z : box.left;
+          top = side === 'top' ? box.top - gap - height * z : box.bottom + gap;
+        }
+        return { left: clampX(left), top: clampY(top) };
       };
 
-      const schedule = (panel) => {
-        panels.add(panel);
+      /**
+       * Re-apply one panel.
+       * @param panel - body-level menu/listbox.
+       * @param refreshOrigin - read the current inline top/left as the app's
+       *   new position (style mutation) instead of keeping the first one.
+       */
+      const correct = (panel, refreshOrigin) => {
+        const record = records.get(panel);
+        if (record === undefined || record.origin === null) return;
+        const z = zoom.getSnapshot() / 100;
+        if (refreshOrigin) {
+          const top = Number.parseFloat(panel.style.top);
+          const left = Number.parseFloat(panel.style.left);
+          if (Number.isFinite(top) && Number.isFinite(left)) {
+            const applied = record.applied;
+            if (applied === undefined
+              || Math.abs(applied.top - top) > 0.5
+              || Math.abs(applied.left - left) > 0.5) {
+              record.origin = { top, left };
+            }
+          }
+        }
+        if (z === 1) {
+          if (record.applied === undefined) return;
+          const placed = place(panel, record, 1);
+          panel.style.removeProperty('zoom');
+          if (placed !== null) {
+            panel.style.left = `${placed.left}px`;
+            panel.style.top = `${placed.top}px`;
+          } else {
+            panel.style.left = `${record.origin.left}px`;
+            panel.style.top = `${record.origin.top}px`;
+          }
+          record.applied = undefined;
+          return;
+        }
+        const placed = place(panel, record, z);
+        if (placed === null) return;
+        const left = placed.left / z;
+        const top = placed.top / z;
+        const applied = record.applied;
+        if (applied !== undefined
+          && Math.abs(applied.left - left) < 0.5
+          && Math.abs(applied.top - top) < 0.5
+          && applied.zoom === z
+          && Math.abs(Number.parseFloat(panel.style.left) - applied.left) < 0.5
+          && Math.abs(Number.parseFloat(panel.style.top) - applied.top) < 0.5) return;
+        panel.style.zoom = String(z);
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+        record.applied = { left, top, zoom: z };
+      };
+
+      const removePanel = (panel) => {
+        const record = records.get(panel);
+        if (record === undefined) return;
+        record.observer?.disconnect();
+        records.delete(panel);
+      };
+
+      const schedule = (panel, refreshOrigin) => {
         requestAnimationFrame(() => {
-          if (panel.isConnected) correct(panel);
+          if (!panel.isConnected) {
+            removePanel(panel);
+            return;
+          }
+          correct(panel, refreshOrigin);
         });
       };
 
-      const observer = new MutationObserver((records) => {
-        for (const panel of panels) if (!panel.isConnected) panels.delete(panel);
-        for (const record of records) {
-          if (record.type === 'childList') {
-            for (const node of record.addedNodes) {
-              if (!(node instanceof HTMLElement)) continue;
-              const panel = panelOf(node);
-              if (panel !== null) schedule(panel);
-            }
-            for (const node of record.removedNodes) {
-              if (node instanceof HTMLElement) panels.delete(node);
-            }
-          } else if (record.type === 'attributes' && record.target instanceof HTMLElement) {
-            const panel = panelOf(record.target);
-            if (panel !== null) schedule(panel);
+      const addPanel = (panel) => {
+        if (records.has(panel)) return;
+        const top = Number.parseFloat(panel.style.top);
+        const left = Number.parseFloat(panel.style.left);
+        const focused = document.activeElement;
+        const anchor = trigger instanceof Element && trigger.isConnected
+          ? trigger
+          : focused instanceof Element && focused !== document.body
+            ? focused
+            : null;
+        const record = {
+          anchor,
+          pointer: pointer === null ? null : { x: pointer.x, y: pointer.y },
+          origin: Number.isFinite(top) && Number.isFinite(left) ? { top, left } : null,
+          applied: undefined,
+          observer: null,
+        };
+        record.observer = new MutationObserver(() => {
+          if (record.origin === null) {
+            const nextTop = Number.parseFloat(panel.style.top);
+            const nextLeft = Number.parseFloat(panel.style.left);
+            if (!Number.isFinite(nextTop) || !Number.isFinite(nextLeft)) return;
+            record.origin = { top: nextTop, left: nextLeft };
+            schedule(panel, false);
+            return;
+          }
+          schedule(panel, true);
+        });
+        record.observer.observe(panel, { attributes: true, attributeFilter: ['style'] });
+        records.set(panel, record);
+        if (record.origin !== null) schedule(panel, false);
+      };
+
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            if (!(node instanceof HTMLElement)) continue;
+            const panel = panelOf(node);
+            if (panel !== null) addPanel(panel);
           }
         }
+        // React can move a portal (remove + insert in one batch) while keeping
+        // the same element; only drop records whose element stayed detached.
+        for (const [panel] of records) if (!panel.isConnected) removePanel(panel);
       });
-      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+      observer.observe(document.body, { childList: true, subtree: true });
 
       ctx.effect(() => {
         window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('pointerover', onPointerOver, true);
         return () => {
           window.removeEventListener('pointerdown', onPointerDown, true);
+          window.removeEventListener('pointerover', onPointerOver, true);
         };
       }, 'ui-zoom: popover anchor');
 
+      ctx.effect(() => zoom.subscribe(() => {
+        for (const [panel] of records) if (panel.isConnected) schedule(panel, false);
+      }), 'ui-zoom: rescale open popovers');
+
       ctx.effect(() => () => {
         observer.disconnect();
-        for (const panel of panels) {
-          panel.style.removeProperty('zoom');
-          applied.delete(panel);
+        for (const [panel, record] of records) {
+          record.observer?.disconnect();
+          if (panel.isConnected && record.applied !== undefined) {
+            panel.style.removeProperty('zoom');
+            panel.style.left = `${record.origin.left}px`;
+            panel.style.top = `${record.origin.top}px`;
+          }
         }
-        panels.clear();
+        records.clear();
       }, 'ui-zoom: popover scaler');
     }
 
@@ -449,11 +583,27 @@ window.__ModuleLoader__.load({
      * @returns the row element tree.
      */
     function ZoomRow({ t, zoom }) {
+      const useLayoutEffect = React.useLayoutEffect ?? React.useEffect;
       const value = React.useSyncExternalStore(zoom.subscribe, zoom.getSnapshot);
       const [open, setOpen] = React.useState(false);
+      const [dropUp, setDropUp] = React.useState(false);
       const rootRef = React.useRef(null);
       const menuRef = React.useRef(null);
       const menuId = React.useId();
+
+      useLayoutEffect(() => {
+        if (!open) {
+          setDropUp(false);
+          return;
+        }
+        const menu = menuRef.current;
+        const stepper = menu?.parentElement?.querySelector('.dshz-stepper');
+        if (stepper === null || stepper === undefined) return;
+        const rect = stepper.getBoundingClientRect();
+        const below = window.innerHeight - rect.bottom;
+        const above = rect.top;
+        setDropUp(below < 310 && above > below);
+      }, [open]);
 
       React.useEffect(() => {
         if (!open) return undefined;
@@ -478,7 +628,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!open || menuRef.current === null) return;
         const current = menuRef.current.querySelector('[aria-selected="true"]');
-        (current === null ? menuRef.current.querySelector('[role="option"]') : current)?.focus();
+        (current === null ? menuRef.current.querySelector('[role="option"]') : current)?.focus({ preventScroll: true });
       }, [open]);
 
       const moveFocus = (event) => {
@@ -527,7 +677,7 @@ window.__ModuleLoader__.load({
             open && h('div', {
               id: menuId,
               ref: menuRef,
-              className: 'dshz-menu',
+              className: `dshz-menu${dropUp ? ' dshz-menu-up' : ''}`,
               role: 'listbox',
               tabIndex: -1,
               'aria-label': t('zoom.menu'),

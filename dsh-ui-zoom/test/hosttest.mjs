@@ -31,7 +31,11 @@ assert.equal(rows[0].kind, 'script');
 assert.equal(rows[0].placement, 'body');
 assert.ok(rows[0].text.includes('var percent = 125'), 'script seeds the profile default');
 assert.ok(rows[0].text.includes("localStorage.getItem('dsh-ui-zoom')"), 'script prefers the stored per-browser choice');
-assert.ok(rows[0].text.includes('String(percent / 100)'), 'script converts the percentage to a CSS factor');
+assert.ok(rows[0].text.includes('(percent / 100)'), 'script converts the percentage to a CSS factor');
+assert.ok(rows[0].text.includes("style.textContent = '#root{zoom:'"), 'boot stylesheet targets the app root');
+assert.ok(rows[0].text.includes('data-dsh-ui-zoom-boot'), 'boot stylesheet is removable by the client');
+assert.ok(!rows[0].text.includes('document.body.style.zoom'), 'boot never zooms body (portal coordinates would double-scale)');
+assert.ok(!rows[0].text.includes("document.getElementById('root') || document.body"), 'no body fallback before #root parses');
 
 assert.equal(run({ zoom: 100 }).length, 1, 'the default still injects the stored-value reader');
 assert.ok(run({ zoom: 100 })[0].text.includes('var percent = 100'), 'default percentage seeded');

@@ -224,6 +224,13 @@ function textOf(node) {
   assert.equal(zoom.getSnapshot(), 50, 'clamped to the minimum');
 }
 
+// --- scenario 5b: corrupted storage falls back to the boot default ------------
+{
+  const { document, zoom } = loadClient({ bootZoom: 125, stored: { 'dsh-ui-zoom': 'nonsense' } });
+  assert.equal(zoom.getSnapshot(), 125, 'invalid storage falls back to the boot value');
+  assert.equal(document.root.style.zoom, '1.25', 'boot value stays applied');
+}
+
 // --- scenario 6: reload without a profile default ------------------------------
 {
   const { document, zoom } = loadClient({ stored: { 'dsh-ui-zoom': '125' } });
